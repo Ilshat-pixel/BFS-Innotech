@@ -1,72 +1,141 @@
+using System.Text;
 using System.Threading.Channels;
 
 namespace Bfs.TestTask.Parser;
 
 public class Parser : IParser
 {
-    public IAsyncEnumerable<IMessage> Parse(ChannelReader<ReadOnlyMemory<byte>> source)
+    public async IAsyncEnumerable<IMessage> Parse(ChannelReader<ReadOnlyMemory<byte>> source)
     {
-        //Перед каждым сообщением первые 2 байта определяют его длину
-        //array[0] = (byte)(message.Length / 256);
-        //array[1] = (byte)(message.Length % 256);
+        List<byte> buffer = new List<byte>();
 
-        throw new NotImplementedException();
+        while (await source.WaitToReadAsync())
+        {
+            while (source.TryRead(out var data))
+            {
+                buffer.AddRange(data.ToArray());
+
+                while (buffer.Count >= 2)
+                {
+                    // Read the length bytes (2 bytes)
+                    int length = (buffer[0] << 8) | buffer[1];
+
+                    if (buffer.Count < length + 2)
+                    {
+                        // Not enough data yet, wait for more data
+                        break;
+                    }
+
+                    // Read the full message based on the length
+                    byte[] messageBytes = buffer.GetRange(2, length).ToArray();
+                    buffer.RemoveRange(0, length + 2);
+
+                    string message = Encoding.ASCII.GetString(messageBytes);
+
+                    // Identify and parse the message
+                    IMessage parsedMessage = ParseMessage(message);
+                    if (parsedMessage != null)
+                    {
+                        yield return parsedMessage;
+                    }
+                }
+            }
+        }
+    }
+
+    private IMessage ParseMessage(string message)
+    {
+        var parts = message.Split(new char[] { '', '' }, StringSplitOptions.None);
+        if (parts.Length < 2)
+        {
+            return null; // invalid message format
+        }
+
+        var messageClass = parts[0][0];
+        var messageSubClass = parts[0][1];
+
+        switch (messageClass)
+        {
+            case '1':
+                if (messageSubClass == '2')
+                {
+                    return ParseCardReaderState(parts);
+                }
+                break;
+            case '2':
+                if (messageSubClass == '2')
+                {
+                    if (parts[3] == "B")
+                    {
+                        return ParseSendStatus(parts);
+                    }
+                    else if (parts[3] == "F")
+                    {
+                        return ParseGetFitnessData(parts);
+                    }
+                }
+                break;
+        }
+
+        return null;
+    }
+
+    private CardReaderState ParseCardReaderState(string[] parts)
+    {
+        var luno = parts[1];
+        var dig = parts[3][0];
+        var deviceStatus = int.Parse(parts[3][1].ToString());
+        var errorSeverity = int.Parse(parts[3][2].ToString());
+        var diagnosticStatus = int.Parse(parts[3][3].ToString());
+        var suppliesStatus = int.Parse(parts[3][4].ToString());
+
+        return new CardReaderState(
+            luno,
+            dig,
+            deviceStatus,
+            errorSeverity,
+            diagnosticStatus,
+            suppliesStatus
+        );
+    }
+
+    private SendStatus ParseSendStatus(string[] parts)
+    {
+        var luno = parts[1];
+        var statusDescriptor = parts[3][0];
+        var transactionNumber = int.Parse(parts[5]);
+
+        return new SendStatus(luno, statusDescriptor, transactionNumber);
+    }
+
+    private GetFitnessData ParseGetFitnessData(string[] parts)
+    {
+        var luno = parts[1];
+        var statusDescriptor = parts[3][0];
+        var messageIdentifier = parts[4][0];
+        var hardwareFitnessIdentifier = parts[4][1];
+        var fitnessStates = new List<FitnessState>()
+        {
+            new FitnessState(parts[4][2], parts[4].Substring(3))
+        };
+
+        for (int i = 5; i < parts.Length; i++)
+        {
+            var part = parts[i];
+            if (part.Length >= 2)
+            {
+                var dig = part[0];
+                var fitness = part.Substring(1);
+                fitnessStates.Add(new FitnessState(dig, fitness));
+            }
+        }
+
+        return new GetFitnessData(
+            luno,
+            statusDescriptor,
+            messageIdentifier,
+            hardwareFitnessIdentifier,
+            fitnessStates.ToArray()
+        );
     }
 }
-
- /*
-       Message with type Card Reader State builded:
-       1200100355D1001
-       Description:
-       (b) 1 = Message class
-       (c) 2 = Message sub-class
-       (d) 00100355 = LUNO
-       CardReaderStateDto { Solicited = False, DeviceIdCode = D, SupplyState = NoOverfillCondition, Status = TimeOutCardHolderTakingCard, Severity = NoError }
-       (g1) D = Device Identifier Graphic
-       (g2) 1 = Device Status (TimeOutCardHolderTakingCard)
-       (g3) 0 = Error Severity (NoError)
-       (g4) 0 = Diagnostic Status
-       (g5) 1 = Supplies Status (NoOverfillCondition)
-
-
-       Message with type Send Status builded:
-       2200100355B4321
-       Description:
-       (b) 2 = Message class
-       (c) 2 = Message sub-class
-       (d) 00100355 = LUNO
-       Status data
-       (f) B = Status Descriptor (TransactionReplyReady)
-       Status Information
-       (g1) 4321 = Transaction number
-
-
-       Message with type Get Fitness Data builded:
-       2200100355FJAD01y1A0E00000G0L0w00040003000200010H0
-       Description:
-       (b) 2 = Message class
-       (c) 2 = Message sub-class
-       (d) 00100355 = LUNO
-       MagneticCardReader RoutineErrorsHaveOccurred,SecondaryCardReader RoutineErrorsHaveOccurred,TimeOfDayClock NoError,CashHandler NoError,ReceiptPrinter NoError,Encryptor NoError,BunchNoteAcceptor NoError,JournalPrinter NoError
-       (f) F = Status Descriptor (TerminalState)
-       Status Information
-       (g1) J = Message Identifier (FitnessData)
-       (g2) A = Hardware Fitness Identifier
-       (g2) D = Device Identifier Graphic MagneticCardReader
-       (g2) 01 = Fitness - RoutineErrorsHaveOccurred
-       (g2) y = Device Identifier Graphic SecondaryCardReader
-       (g2) 1 = Fitness - RoutineErrorsHaveOccurred
-       (g2) A = Device Identifier Graphic TimeOfDayClock
-       (g2) 0 = Fitness - NoError
-       (g2) E = Device Identifier Graphic CashHandler
-       (g2) 00000 = Fitness - NoError
-       (g2) G = Device Identifier Graphic ReceiptPrinter
-       (g2) 0 = Fitness - NoError
-       (g2) L = Device Identifier Graphic Encryptor
-       (g2) 0 = Fitness - NoError
-       (g2) w = Device Identifier Graphic BunchNoteAcceptor
-       (g2) 00040003000200010 = Fitness - NoError
-       (g2) H = Device Identifier Graphic JournalPrinter
-       (g2) 0 = Fitness - NoError
-
-     */
