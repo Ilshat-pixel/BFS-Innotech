@@ -9,72 +9,61 @@ public class Parser : IParser
     {
         List<byte> buffer = new List<byte>();
 
-        while (await source.WaitToReadAsync())
+        //NOTE: явно не оптимально.
+        await foreach (var data in source.ReadAllAsync())
         {
-            while (source.TryRead(out var data))
+            buffer.AddRange(data.ToArray());
+
+            while (buffer.Count >= 2)
             {
-                buffer.AddRange(data.ToArray());
+                int length = (buffer[0] << 8) | buffer[1];
 
-                while (buffer.Count >= 2)
+                if (buffer.Count < length + 2)
                 {
-                    // Read the length bytes (2 bytes)
-                    int length = (buffer[0] << 8) | buffer[1];
+                    break;
+                }
 
-                    if (buffer.Count < length + 2)
-                    {
-                        // Not enough data yet, wait for more data
-                        break;
-                    }
+                byte[] messageBytes = buffer.GetRange(2, length).ToArray();
+                buffer.RemoveRange(0, length + 2);
 
-                    // Read the full message based on the length
-                    byte[] messageBytes = buffer.GetRange(2, length).ToArray();
-                    buffer.RemoveRange(0, length + 2);
+                string message = Encoding.ASCII.GetString(messageBytes);
 
-                    string message = Encoding.ASCII.GetString(messageBytes);
-
-                    // Identify and parse the message
-                    IMessage parsedMessage = ParseMessage(message);
-                    if (parsedMessage != null)
-                    {
-                        yield return parsedMessage;
-                    }
+                IMessage? parsedMessage = ParseMessage(message);
+                if (parsedMessage != null)
+                {
+                    yield return parsedMessage;
                 }
             }
         }
     }
 
-    private IMessage ParseMessage(string message)
+    private IMessage? ParseMessage(string message)
     {
         var parts = message.Split(new char[] { '', '' }, StringSplitOptions.None);
         if (parts.Length < 2)
         {
-            return null; // invalid message format
+            return null;
         }
 
         var messageClass = parts[0][0];
         var messageSubClass = parts[0][1];
 
-        switch (messageClass)
+        if (messageClass == '1' && messageSubClass == '2')
         {
-            case '1':
-                if (messageSubClass == '2')
-                {
-                    return ParseCardReaderState(parts);
-                }
-                break;
-            case '2':
-                if (messageSubClass == '2')
-                {
-                    if (parts[3] == "B")
-                    {
-                        return ParseSendStatus(parts);
-                    }
-                    else if (parts[3] == "F")
-                    {
-                        return ParseGetFitnessData(parts);
-                    }
-                }
-                break;
+            return ParseCardReaderState(parts);
+        }
+
+        if (messageClass == '2' && messageSubClass == '2')
+        {
+            if (parts[3] == "B")
+            {
+                return ParseSendStatus(parts);
+            }
+
+            if (parts[3] == "F")
+            {
+                return ParseGetFitnessData(parts);
+            }
         }
 
         return null;

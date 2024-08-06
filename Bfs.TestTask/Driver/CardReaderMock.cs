@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 
@@ -8,8 +7,6 @@ public class CardDriverMock : ICardDriverMock
 {
     private CardData? _cardData;
     private bool _canReadCard = true;
-    private readonly ConcurrentQueue<EjectResult> _ejectResults =
-        new ConcurrentQueue<EjectResult>();
     private readonly Channel<EjectResult> _ejectChannel = Channel.CreateUnbounded<EjectResult>();
 
     public void SetCardData(CardData cardData)
@@ -24,44 +21,29 @@ public class CardDriverMock : ICardDriverMock
 
     public void TakeCard()
     {
-        _ejectResults.Enqueue(EjectResult.CardTaken);
         _ejectChannel.Writer.TryWrite(EjectResult.CardTaken);
     }
 
     public async Task<CardData?> ReadCard(CancellationToken cancellationToken)
     {
-        if (cancellationToken.IsCancellationRequested)
+        while (!cancellationToken.IsCancellationRequested && _canReadCard)
         {
-            return null;
-        }
-        try
-        {
-            await Task.Delay(10, cancellationToken); // Simulate delay
+            await Task.Delay(10);
             return _cardData;
         }
-        catch (OperationCanceledException _)
-        {
-            return null;
-        }
+
+        return null;
     }
 
     public async IAsyncEnumerable<EjectResult> EjectCard(
         [EnumeratorCancellation] CancellationToken cancellationToken
     )
     {
-        _ejectChannel.Writer.TryWrite(EjectResult.Ejected);
+        await _ejectChannel.Writer.WriteAsync(EjectResult.Ejected);
 
         while (!cancellationToken.IsCancellationRequested)
         {
-            if (_ejectChannel.Reader.TryRead(out var result))
-            {
-                yield return result;
-
-                if (result == EjectResult.CardTaken)
-                {
-                    yield break;
-                }
-            }
+            yield return await _ejectChannel.Reader.ReadAsync(cancellationToken);
         }
 
         yield return EjectResult.Retracted;
